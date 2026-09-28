@@ -4,6 +4,7 @@ const loginForm = document.getElementById('login-form');
 const scannerForm = document.getElementById('scanner-form');
 const authStatus = document.getElementById('auth-status');
 const fileInput = document.getElementById('file-input');
+const filePreview = document.getElementById('file-preview');
 const sourceInput = document.getElementById('source-input');
 const transcriptionOutput = document.getElementById('transcription-output');
 const scanButton = document.getElementById('scan-button');
@@ -12,6 +13,11 @@ const clearButton = document.getElementById('clear-button');
 const recordsTableBody = document.getElementById('records-table-body');
 const searchInput = document.getElementById('search-input');
 const statusFilter = document.getElementById('status-filter');
+const recordModal = document.getElementById('record-modal');
+const closeRecordModal = document.getElementById('close-record-modal');
+const recordModalTitle = document.getElementById('record-modal-title');
+const recordModalImage = document.getElementById('record-modal-image');
+const recordModalText = document.getElementById('record-modal-text');
 const welcomeTitle = document.getElementById('welcome-title');
 const welcomeCopy = document.getElementById('welcome-copy');
 const statNotes = document.getElementById('stat-notes');
@@ -32,6 +38,7 @@ const AUTH_KEY = 'guadahealth-auth';
 let currentUser = '';
 let records = [];
 let activeView = 'dashboard';
+let previewUrl = '';
 
 function loadRecords() {
   const saved = localStorage.getItem(RECORDS_KEY);
@@ -127,11 +134,8 @@ function renderDashboardStats() {
 
 function renderRecords() {
   const query = searchInput.value.trim().toLowerCase();
-  const filter = statusFilter.value;
   const visibleRecords = records.filter((record) => {
-    const matchesText = [record.source, record.status].join(' ').toLowerCase().includes(query);
-    const matchesStatus = filter === 'all' || record.status === filter;
-    return matchesText && matchesStatus;
+    return [record.source, record.transcription].join(' ').toLowerCase().includes(query);
   });
 
   if (!visibleRecords.length) {
@@ -145,14 +149,13 @@ function renderRecords() {
 
   recordsTableBody.innerHTML = visibleRecords
     .map((record) => {
-      const badgeClass = record.status === 'Reviewed' ? 'reviewed' : 'pending';
       return `
         <tr>
           <td>${escapeHtml(record.source || 'Untitled note')}</td>
-          <td><span class="badge ${badgeClass}">${escapeHtml(record.status)}</span></td>
+          <td><span class="badge reviewed">Reviewed by clinician</span></td>
           <td>${escapeHtml(record.savedAt)}</td>
           <td>
-            <button class="ghost-btn review-btn" data-id="${record.id}" type="button">${record.status === 'Reviewed' ? 'Re-open' : 'Mark reviewed'}</button>
+            <button class="ghost-btn view-record-btn" data-id="${record.id}" type="button">View note</button>
           </td>
         </tr>
       `;
@@ -178,6 +181,58 @@ function switchView(viewName) {
 function clearForm() {
   scannerForm.reset();
   transcriptionOutput.value = '';
+  if (previewUrl) {
+    URL.revokeObjectURL(previewUrl);
+    previewUrl = '';
+  }
+  filePreview.className = 'file-preview empty';
+  filePreview.innerHTML = '<div class="preview-placeholder">Your selected document will appear here.</div>';
+}
+
+function openRecordModal(record) {
+  recordModalTitle.textContent = record.source || 'Untitled note';
+  recordModalText.textContent = record.transcription || 'No transcription saved.';
+
+  if (record.imageData) {
+    recordModalImage.innerHTML = `<img src="${record.imageData}" alt="Original document for ${escapeHtml(record.source || 'saved note')}" />`;
+  } else {
+    recordModalImage.innerHTML = '<div class="modal-empty-state">No image was saved with this older record.</div>';
+  }
+
+  recordModal.classList.remove('hidden');
+}
+
+function closeModal() {
+  recordModal.classList.add('hidden');
+}
+
+function renderFilePreview() {
+  const selectedFile = fileInput.files[0];
+  if (!selectedFile) {
+    filePreview.className = 'file-preview empty';
+    filePreview.innerHTML = '<div class="preview-placeholder">Your selected document will appear here.</div>';
+    return;
+  }
+
+  if (previewUrl) {
+    URL.revokeObjectURL(previewUrl);
+  }
+
+  previewUrl = URL.createObjectURL(selectedFile);
+  filePreview.className = 'file-preview';
+
+  if (selectedFile.type.startsWith('image/')) {
+    filePreview.innerHTML = `<img src="${previewUrl}" alt="Preview of ${escapeHtml(selectedFile.name)}" />`;
+    return;
+  }
+
+  filePreview.innerHTML = `
+    <div class="document-placeholder">
+      <span class="document-icon">PDF</span>
+      <strong>${escapeHtml(selectedFile.name)}</strong>
+      <span>PDF selected. A visual preview is unavailable in this workspace.</span>
+    </div>
+  `;
 }
 
 loginForm.addEventListener('submit', (event) => {
@@ -198,6 +253,8 @@ loginForm.addEventListener('submit', (event) => {
     showToast('Invalid credentials. Try staff / guada2026');
   }
 });
+
+fileInput.addEventListener('change', renderFilePreview);
 
 scanButton.addEventListener('click', () => {
   if (!currentUser) {
@@ -235,10 +292,26 @@ scannerForm.addEventListener('submit', (event) => {
     id: `note-${Date.now()}`,
     source,
     transcription: transcriptionOutput.value || 'No transcription generated yet.',
-    status: 'Pending review',
+    status: 'Reviewed',
     savedAt: new Date().toLocaleString(),
     owner: currentUser,
   };
+
+  if (fileInput.files[0].type.startsWith('image/')) {
+    const reader = new FileReader();
+    reader.addEventListener('load', () => {
+      record.imageData = reader.result;
+      records.unshift(record);
+      saveRecords();
+      renderDashboardStats();
+      renderRecords();
+      showToast(`Saved note for ${source}`);
+      clearForm();
+      switchView('records');
+    });
+    reader.readAsDataURL(fileInput.files[0]);
+    return;
+  }
 
   records.unshift(record);
   saveRecords();
@@ -265,7 +338,7 @@ logoutBtn.addEventListener('click', () => {
 });
 
 recordsTableBody.addEventListener('click', (event) => {
-  const button = event.target.closest('.review-btn');
+  const button = event.target.closest('.view-record-btn');
   if (!button) {
     return;
   }
@@ -276,15 +349,21 @@ recordsTableBody.addEventListener('click', (event) => {
     return;
   }
 
-  note.status = note.status === 'Reviewed' ? 'Pending review' : 'Reviewed';
-  saveRecords();
-  renderDashboardStats();
-  renderRecords();
-  showToast(`Updated ${note.source}`);
+  openRecordModal(note);
 });
 
 searchInput.addEventListener('input', renderRecords);
-statusFilter.addEventListener('change', renderRecords);
+closeRecordModal.addEventListener('click', closeModal);
+recordModal.addEventListener('click', (event) => {
+  if (event.target === recordModal) {
+    closeModal();
+  }
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    closeModal();
+  }
+});
 
 window.addEventListener('DOMContentLoaded', () => {
   records = loadRecords();
